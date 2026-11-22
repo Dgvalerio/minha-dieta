@@ -1,0 +1,16 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Sem login: o cardápio fica num documento aberto em /cardapios/{id}.
+    // As regras só limitam o formato do que pode ser gravado.
+    match /cardapios/{id} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasOnly(['plan', 'checked', 'updatedAt'])
+        && request.resource.data.plan is list
+        && request.resource.data.plan.size() == 7
+        && request.resource.data.checked is list
+        && request.resource.data.checked.size() <= 50;
+      allow delete: if false;
+    }
+  }
+}

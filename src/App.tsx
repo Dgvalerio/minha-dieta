@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, CopyCheck, Leaf, RotateCcw, Repeat, ShoppingBasket, UtensilsCrossed, Undo2 } from "lucide-react";
+import { Cloud, CloudOff, Copy, CopyCheck, Leaf, Loader2, RotateCcw, Repeat, ShoppingBasket, UtensilsCrossed, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +8,37 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { BASICS, DAYS, INGREDIENTS, MEALS, SALAD_SUGGESTIONS, SECTIONS, type IngId } from "./data";
+import { onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import { planDoc } from "@/lib/firebase";
+
+type SyncState = "local" | "loading" | "saving" | "saved" | "offline" | "error";
+
+const SYNC_LABEL: Record<SyncState, string> = {
+  local: "Salvo só neste aparelho",
+  loading: "Carregando da nuvem…",
+  saving: "Salvando…",
+  saved: "Salvo na nuvem",
+  offline: "Sem conexão, salva quando voltar",
+  error: "Erro ao salvar na nuvem",
+};
+
+function SyncStatus({ state }: { state: SyncState }) {
+  const Icon = state === "loading" || state === "saving" ? Loader2 : state === "saved" ? Cloud : CloudOff;
+  return (
+    <span
+      role="status"
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium",
+        state === "saved" && "border-primary/30 bg-primary-soft text-primary",
+        state === "error" && "border-red-500/40 text-red-600 dark:text-red-400",
+        (state === "local" || state === "offline" || state === "loading" || state === "saving") && "text-muted-foreground"
+      )}
+    >
+      <Icon className={cn("h-3.5 w-3.5", (state === "loading" || state === "saving") && "animate-spin")} />
+      {SYNC_LABEL[state]}
+    </span>
+  );
+}
 
 type MealPlan = { on: boolean; pick: Record<string, number> };
 type DayPlan = Record<string, MealPlan>;
@@ -22,12 +53,24 @@ const defaultDay = (): DayPlan =>
 const defaultWeek = (): WeekPlan => DAYS.map(() => defaultDay());
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 
-function load(): { plan: WeekPlan; checked: string[] } | null {
+type Saved = { plan: WeekPlan; checked: string[] };
+
+const serialize = (plan: WeekPlan, checked: Set<string>) => JSON.stringify({ plan, checked: [...checked].sort() });
+
+function load(): Saved | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data.plan) || data.plan.length !== 7) return null;
+    return normalize(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+// Valida dados vindos do localStorage ou do Firestore e completa refeições/slots que faltarem.
+function normalize(data: any): Saved | null {
+  try {
+    if (!data || !Array.isArray(data.plan) || data.plan.length !== 7) return null;
     // garante que refeições/slots novos existam
     const plan = data.plan.map((d: DayPlan) => {
       const base = defaultDay();
@@ -75,6 +118,60 @@ export default function App() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ plan, checked: [...checked] }));
     } catch { /* sem armazenamento: segue funcionando */ }
   }, [plan, checked]);
+
+  // ---------- sincronização com o Firestore ----------
+  const [sync, setSync] = useState<SyncState>(planDoc ? "loading" : "local");
+  const [cloudReady, setCloudReady] = useState(false);
+  const lastSynced = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!planDoc) return;
+    return onSnapshot(
+      planDoc,
+      { includeMetadataChanges: true },
+      (snap) => {
+        if (snap.metadata.hasPendingWrites) {
+          setSync("saving");
+          return;
+        }
+        if (snap.exists()) {
+          const remote = normalize(snap.data());
+          if (remote) {
+            const checkedSet = new Set(remote.checked);
+            const json = serialize(remote.plan, checkedSet);
+            if (json !== lastSynced.current) {
+              lastSynced.current = json;
+              setPlan(remote.plan);
+              setChecked(checkedSet);
+            }
+          }
+        } else if (snap.metadata.fromCache) {
+          // cache vazio ainda não diz se o documento existe no servidor: espera a resposta
+          return;
+        }
+        setCloudReady(true);
+        setSync(snap.metadata.fromCache ? "offline" : "saved");
+      },
+      (err) => {
+        console.error("Firestore:", err);
+        setSync("error");
+      }
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!planDoc || !cloudReady) return;
+    const json = serialize(plan, checked);
+    if (json === lastSynced.current) return;
+    const t = window.setTimeout(() => {
+      lastSynced.current = json;
+      setDoc(planDoc!, { plan, checked: [...checked], updatedAt: serverTimestamp() }).catch((err) => {
+        console.error("Firestore:", err);
+        setSync("error");
+      });
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [plan, checked, cloudReady]);
 
   const showToast = (msg: string, undo?: WeekPlan) => {
     setToast({ msg, undo });
@@ -198,9 +295,12 @@ export default function App() {
             Escolha o que vai comer em cada dia. A lista de compras soma a semana e converte os pesos do prato pronto para o que você compra cru.
           </p>
         </div>
-        <Button variant="ghost" size="sm" onClick={resetWeek}>
-          <RotateCcw /> Recomeçar a semana
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <SyncStatus state={sync} />
+          <Button variant="ghost" size="sm" onClick={resetWeek}>
+            <RotateCcw /> Recomeçar a semana
+          </Button>
+        </div>
       </header>
 
       <Tabs value={view} onValueChange={setView}>
