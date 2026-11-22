@@ -1,0 +1,65 @@
+/* Layout: day picker + meal cards on the left, live shopping list on the right (tabs on phone). */
+:root {
+  --background: 140 20% 97%;
+  --foreground: 150 25% 11%;
+  --card: 0 0% 100%;
+  --muted: 140 16% 93%;
+  --muted-foreground: 150 8% 38%;
+  --border: 140 12% 86%;
+  --primary: 152 58% 29%;
+  --primary-foreground: 0 0% 100%;
+  --primary-soft: 148 45% 92%;
+  --accent: 43 96% 48%;
+  --accent-foreground: 32 70% 13%;
+  --accent-soft: 46 95% 90%;
+  --ring: 152 58% 35%;
+  --radius: 0.75rem;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --background: 150 18% 7%;
+    --foreground: 140 15% 93%;
+    --card: 150 16% 10%;
+    --muted: 150 12% 15%;
+    --muted-foreground: 140 8% 63%;
+    --border: 150 10% 21%;
+    --primary: 150 50% 50%;
+    --primary-foreground: 150 45% 7%;
+    --primary-soft: 152 35% 16%;
+    --accent: 44 92% 56%;
+    --accent-foreground: 35 60% 10%;
+    --accent-soft: 42 45% 17%;
+    --ring: 150 50% 50%;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --background: 150 18% 7%;
+  --foreground: 140 15% 93%;
+  --card: 150 16% 10%;
+  --muted: 150 12% 15%;
+  --muted-foreground: 140 8% 63%;
+  --border: 150 10% 21%;
+  --primary: 150 50% 50%;
+  --primary-foreground: 150 45% 7%;
+  --primary-soft: 152 35% 16%;
+  --accent: 44 92% 56%;
+  --accent-foreground: 35 60% 10%;
+  --accent-soft: 42 45% 17%;
+  --ring: 150 50% 50%;
+  color-scheme: dark;
+}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@layer base {
+  * { @apply border-border; }
+  html, body { background: hsl(var(--background)); }
+  body { @apply text-foreground font-sans antialiased; }
+  h1, h2, h3 { text-wrap: balance; }
+  .tabular { font-variant-numeric: tabular-nums; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
