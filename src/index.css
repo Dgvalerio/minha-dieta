@@ -1,4 +1,5 @@
-/* Layout: day picker + meal cards on the left, live shopping list on the right (tabs on phone). */
+/* Davi = verde (primary), Irys = rosa (irys).
+   Layout: day picker + meal cards on the left, live shopping list on the right (tabs on phone). */
 :root {
   --background: 140 20% 97%;
   --foreground: 150 25% 11%;
@@ -12,6 +13,8 @@
   --accent: 43 96% 48%;
   --accent-foreground: 32 70% 13%;
   --accent-soft: 46 95% 90%;
+  --irys: 330 55% 42%;
+  --irys-soft: 330 60% 95%;
   --ring: 152 58% 35%;
   --radius: 0.75rem;
   --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
@@ -32,6 +35,8 @@
     --accent: 44 92% 56%;
     --accent-foreground: 35 60% 10%;
     --accent-soft: 42 45% 17%;
+    --irys: 330 65% 72%;
+    --irys-soft: 330 30% 17%;
     --ring: 150 50% 50%;
     color-scheme: dark;
   }
@@ -49,6 +54,8 @@
   --accent: 44 92% 56%;
   --accent-foreground: 35 60% 10%;
   --accent-soft: 42 45% 17%;
+  --irys: 330 65% 72%;
+  --irys-soft: 330 30% 17%;
   --ring: 150 50% 50%;
   color-scheme: dark;
 }

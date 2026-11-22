@@ -1,16 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Cloud, CloudOff, Copy, CopyCheck, Leaf, Loader2, RotateCcw, Repeat, ShoppingBasket, UtensilsCrossed, Undo2 } from "lucide-react";
+import {
+  Cloud, CloudOff, Copy, CopyCheck, Leaf, Link2, Loader2, RotateCcw, Repeat, ShoppingBasket, Split, Undo2, UtensilsCrossed,
+} from "lucide-react";
+import { onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { BASICS, DAYS, INGREDIENTS, MEALS, SALAD_SUGGESTIONS, SECTIONS, type IngId } from "./data";
-import { onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { planDoc } from "@/lib/firebase";
+import {
+  BASICS, DAYS, FACTORS, INGREDIENTS, MEALS, PEOPLE, SALAD_SUGGESTIONS, SECTIONS,
+  type IngId, type Meal, type Option, type Person, type Slot,
+} from "./data";
+import {
+  canSplit, changesInDay, chosen, defaultDay, defaultWeek, isSplit, normalizeWeek, optionsFor, sharedOptions, slotPeople,
+  type MealPlan, type WeekPlan,
+} from "./plan";
 
+const STORAGE_KEY = "cardapio-semana-v1";
+
+type Saved = { plan: WeekPlan; checked: string[] };
 type SyncState = "local" | "loading" | "saving" | "saved" | "offline" | "error";
 
 const SYNC_LABEL: Record<SyncState, string> = {
@@ -22,81 +33,183 @@ const SYNC_LABEL: Record<SyncState, string> = {
   error: "Erro ao salvar na nuvem",
 };
 
+const PERSON_STYLE: Record<Person, { text: string; on: string; dot: string }> = {
+  davi: { text: "text-primary", on: "border-primary/40 bg-primary-soft text-primary", dot: "bg-primary" },
+  irys: { text: "text-irys", on: "border-irys/40 bg-irys-soft text-irys", dot: "bg-irys" },
+};
+const personName = (p: Person) => PEOPLE.find((x) => x.id === p)!.name;
+
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+const serialize = (plan: WeekPlan, checked: Set<string>) => JSON.stringify({ plan, checked: [...checked].sort() });
+
+function normalize(data: any): Saved | null {
+  const plan = normalizeWeek(data?.plan);
+  if (!plan) return null;
+  return { plan, checked: Array.isArray(data.checked) ? data.checked.filter((x: unknown) => typeof x === "string") : [] };
+}
+function load(): Saved | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? normalize(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+
 function SyncStatus({ state }: { state: SyncState }) {
-  const Icon = state === "loading" || state === "saving" ? Loader2 : state === "saved" ? Cloud : CloudOff;
+  const busy = state === "loading" || state === "saving";
+  const Icon = busy ? Loader2 : state === "saved" ? Cloud : CloudOff;
   return (
     <span
       role="status"
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium",
-        state === "saved" && "border-primary/30 bg-primary-soft text-primary",
-        state === "error" && "border-red-500/40 text-red-600 dark:text-red-400",
-        (state === "local" || state === "offline" || state === "loading" || state === "saving") && "text-muted-foreground"
+        state === "saved" ? "border-primary/30 bg-primary-soft text-primary"
+          : state === "error" ? "border-red-500/40 text-red-600 dark:text-red-400"
+          : "text-muted-foreground"
       )}
     >
-      <Icon className={cn("h-3.5 w-3.5", (state === "loading" || state === "saving") && "animate-spin")} />
+      <Icon className={cn("h-3.5 w-3.5", busy && "animate-spin")} />
       {SYNC_LABEL[state]}
     </span>
   );
 }
 
-type MealPlan = { on: boolean; pick: Record<string, number> };
-type DayPlan = Record<string, MealPlan>;
-type WeekPlan = DayPlan[];
+function PersonTag({ p, className }: { p: Person; className?: string }) {
+  return <span className={cn("font-semibold", PERSON_STYLE[p].text, className)}>{personName(p)}</span>;
+}
 
-const STORAGE_KEY = "cardapio-semana-v1";
-
-const defaultDay = (): DayPlan =>
-  Object.fromEntries(
-    MEALS.map((m) => [m.id, { on: true, pick: Object.fromEntries(m.slots.map((s) => [s.id, 0])) }])
+/** Botão de opção. `show` diz de quem mostrar a porção. */
+function OptionChip({ option, show, selected, principal, onClick }: {
+  option: Option; show: Person[]; selected: boolean; principal: boolean; onClick: () => void;
+}) {
+  return (
+    <button
+      role="radio"
+      aria-checked={selected}
+      onClick={onClick}
+      className={cn(
+        "flex items-start gap-2.5 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        selected ? "border-primary bg-primary-soft" : "bg-card hover:bg-muted"
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "mt-1 h-3.5 w-3.5 shrink-0 rounded-full border-2",
+          selected ? "border-primary bg-primary shadow-[inset_0_0_0_2px_hsl(var(--primary-soft))]" : "border-muted-foreground/50"
+        )}
+      />
+      <span className="min-w-0">
+        <span className="flex flex-wrap items-center gap-1.5 text-sm font-semibold">
+          {option.name}
+          {principal && <Badge className="bg-accent-soft text-accent-foreground dark:text-accent">principal</Badge>}
+        </span>
+        {show.map((p) =>
+          option[p] ? (
+            <span key={p} className="block text-xs text-muted-foreground">
+              {show.length > 1 && <PersonTag p={p} className="mr-1" />}
+              {option[p]!.portion}
+            </span>
+          ) : null
+        )}
+      </span>
+    </button>
   );
-const defaultWeek = (): WeekPlan => DAYS.map(() => defaultDay());
-const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
-
-type Saved = { plan: WeekPlan; checked: string[] };
-
-const serialize = (plan: WeekPlan, checked: Set<string>) => JSON.stringify({ plan, checked: [...checked].sort() });
-
-function load(): Saved | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return normalize(JSON.parse(raw));
-  } catch {
-    return null;
-  }
 }
 
-// Valida dados vindos do localStorage ou do Firestore e completa refeições/slots que faltarem.
-function normalize(data: any): Saved | null {
-  try {
-    if (!data || !Array.isArray(data.plan) || data.plan.length !== 7) return null;
-    // garante que refeições/slots novos existam
-    const plan = data.plan.map((d: DayPlan) => {
-      const base = defaultDay();
-      for (const m of MEALS) {
-        if (!d?.[m.id]) continue;
-        base[m.id].on = d[m.id].on !== false;
-        for (const s of m.slots) {
-          const v = d[m.id].pick?.[s.id];
-          if (typeof v === "number" && v >= 0 && v < s.options.length) base[m.id].pick[s.id] = v;
-        }
-      }
-      return base;
-    });
-    return { plan, checked: Array.isArray(data.checked) ? data.checked : [] };
-  } catch {
-    return null;
-  }
-}
+function SlotBlock({ slot, mp, onPick, onIrysPick, onSplit, onJoin }: {
+  slot: Slot; mp: MealPlan;
+  onPick: (id: string) => void; onIrysPick: (id: string) => void; onSplit: () => void; onJoin: () => void;
+}) {
+  const people = slotPeople(slot);
+  const active = people.filter((p) => mp.on[p]);
+  if (active.length === 0) return null;
+  const onlyOne = people.length === 1;
+  const split = isSplit(mp, slot);
 
-function changesInDay(d: DayPlan) {
-  let n = 0;
-  for (const m of MEALS) {
-    if (!d[m.id].on) { n++; continue; }
-    for (const s of m.slots) if (d[m.id].pick[s.id] !== 0) n++;
+  const heading = (
+    <p className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+      {slot.label}
+      {onlyOne && <span>· só <PersonTag p={people[0]} /></span>}
+    </p>
+  );
+
+  // Item fixo (uma opção só pra todo mundo que está em casa)
+  const shared = sharedOptions(slot);
+  if (!split && shared.length === 1) {
+    const o = shared[0];
+    return (
+      <div>
+        {heading}
+        <div className="rounded-md bg-muted px-3 py-2">
+          <p className="text-sm font-semibold">{o.name}</p>
+          {active.map((p) => (
+            <p key={p} className="text-xs text-muted-foreground">
+              {!onlyOne && <PersonTag p={p} className="mr-1" />}
+              {o[p]?.portion}
+            </p>
+          ))}
+        </div>
+        {canSplit(slot) && mp.on.irys && (
+          <Button variant="ghost" size="sm" className="mt-1 h-7 px-2 text-irys" onClick={onSplit}>
+            <Split /> Irys diferente
+          </Button>
+        )}
+      </div>
+    );
   }
-  return n;
+
+  if (split) {
+    return (
+      <div>
+        {heading}
+        <div className="flex flex-col gap-3 rounded-md border border-dashed p-3">
+          {active.map((p) => {
+            const own = optionsFor(slot, p);
+            const cur = chosen(slot, p, mp);
+            return (
+              <div key={p} role="radiogroup" aria-label={`${slot.label} de ${personName(p)}`}>
+                <p className="mb-1.5 text-xs"><PersonTag p={p} /></p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {own.map((o, i) => (
+                    <OptionChip
+                      key={o.id}
+                      option={o}
+                      show={[p]}
+                      selected={cur?.id === o.id}
+                      principal={i === 0}
+                      onClick={() => (p === "irys" ? onIrysPick(o.id) : onPick(o.id))}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <Button variant="ghost" size="sm" className="mt-1 h-7 px-2" onClick={onJoin}>
+          <Link2 /> Igual pros dois
+        </Button>
+      </div>
+    );
+  }
+
+  const cur = chosen(slot, active[0], mp);
+  return (
+    <div role="radiogroup" aria-label={slot.label}>
+      {heading}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {shared.map((o, i) => (
+          <OptionChip key={o.id} option={o} show={active} selected={cur?.id === o.id} principal={i === 0} onClick={() => onPick(o.id)} />
+        ))}
+      </div>
+      {canSplit(slot) && mp.on.irys && (
+        <Button variant="ghost" size="sm" className="mt-1 h-7 px-2 text-irys" onClick={onSplit}>
+          <Split /> Irys diferente
+        </Button>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
@@ -173,22 +286,17 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [plan, checked, cloudReady]);
 
+  // ---------- ações ----------
   const showToast = (msg: string, undo?: WeekPlan) => {
     setToast({ msg, undo });
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), 6000);
   };
 
-  const setPick = (mealId: string, slotId: string, idx: number) =>
+  const updateMeal = (mealId: string, fn: (mp: MealPlan) => void) =>
     setPlan((p) => {
       const n = clone(p);
-      n[day][mealId].pick[slotId] = idx;
-      return n;
-    });
-  const setOn = (mealId: string, on: boolean) =>
-    setPlan((p) => {
-      const n = clone(p);
-      n[day][mealId].on = on;
+      fn(n[day][mealId]);
       return n;
     });
 
@@ -214,27 +322,37 @@ export default function App() {
 
   // ---------- totais ----------
   const totals = useMemo(() => {
-    const map = new Map<IngId, { qty: number; by: Map<string, number> }>();
-    let mealsOn = 0;
-    let lunches = 0;
+    const map = new Map<IngId, { qty: number; by: Map<string, Record<Person, number>> }>();
+    const mealsOn: Record<Person, number> = { davi: 0, irys: 0 };
+    const mealsTotal: Record<Person, number> = { davi: 0, irys: 0 };
+    let saladPlates = 0;
     plan.forEach((d) => {
       for (const m of MEALS) {
-        if (!d[m.id].on) continue;
-        mealsOn++;
-        if (m.id === "almoco") lunches++;
-        for (const s of m.slots) {
-          const opt = s.options[d[m.id].pick[s.id]];
-          for (const u of opt.uses) {
-            const cur = map.get(u.ing) ?? { qty: 0, by: new Map() };
-            cur.qty += u.qty;
-            const key = s.options.length > 1 ? `${m.name.split(" ")[0]} · ${opt.name.toLowerCase()}` : m.name;
-            cur.by.set(key, (cur.by.get(key) ?? 0) + 1);
-            map.set(u.ing, cur);
+        const mp = d[m.id];
+        for (const { id: p } of PEOPLE) {
+          if (!m.slots.some((s) => optionsFor(s, p).length > 0)) continue;
+          mealsTotal[p]++;
+          if (!mp.on[p]) continue;
+          mealsOn[p]++;
+          if (m.freeText) saladPlates++;
+          for (const s of m.slots) {
+            const o = chosen(s, p, mp);
+            const portion = o?.[p];
+            if (!o || !portion) continue;
+            for (const u of portion.uses) {
+              const cur = map.get(u.ing) ?? { qty: 0, by: new Map() };
+              cur.qty += u.qty;
+              const key = `${m.short} · ${o.name.toLowerCase()}`;
+              const counts = cur.by.get(key) ?? { davi: 0, irys: 0 };
+              counts[p]++;
+              cur.by.set(key, counts);
+              map.set(u.ing, cur);
+            }
           }
         }
       }
     });
-    return { map, mealsOn, lunches };
+    return { map, mealsOn, mealsTotal, saladPlates };
   }, [plan]);
 
   const grouped = SECTIONS.map((sec) => ({
@@ -255,15 +373,15 @@ export default function App() {
     });
 
   const listText = () => {
-    const lines = ["Lista de compras da semana", ""];
+    const lines = ["Lista de compras da semana (Davi e Irys)", ""];
     for (const g of grouped) {
       lines.push(g.sec.toUpperCase());
       for (const it of g.items) lines.push(`- ${it.ing.copy(it.qty)}`);
       lines.push("");
     }
-    if (totals.lunches > 0) {
+    if (totals.saladPlates > 0) {
       lines.push("SALADA E LEGUMES (à vontade)");
-      lines.push(`- Para ${totals.lunches} almoços: ${SALAD_SUGGESTIONS.join(", ").toLowerCase()}`);
+      lines.push(`- Para ${totals.saladPlates} pratos no almoço: ${SALAD_SUGGESTIONS.join(", ").toLowerCase()}`);
       lines.push("");
     }
     lines.push("BÁSICOS (se faltar em casa)");
@@ -285,14 +403,24 @@ export default function App() {
   const dayPlan = plan[day];
   const dayChanges = changesInDay(dayPlan);
 
+  const byText = (by: Map<string, Record<Person, number>>) =>
+    [...by.entries()]
+      .map(([k, c]) => {
+        const parts = PEOPLE.filter((p) => c[p.id] > 0).map((p) => `${p.name} ${c[p.id]}`);
+        return `${k} (${parts.join(", ")})`;
+      })
+      .join(" · ");
+
   return (
     <div className="mx-auto max-w-6xl px-4 pb-24 pt-6 sm:pt-10">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div className="max-w-2xl">
-          <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-primary">Dieta da nutricionista</p>
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wider">
+            <PersonTag p="davi" /> <span className="text-muted-foreground">e</span> <PersonTag p="irys" />
+          </p>
           <h1 className="font-display text-3xl font-bold leading-tight sm:text-4xl">Cardápio da semana</h1>
           <p className="mt-2 text-muted-foreground">
-            Escolha o que vai comer em cada dia. A lista de compras soma a semana e converte os pesos do prato pronto para o que você compra cru.
+            A escolha de cada refeição vale pros dois, cada um com a porção da sua dieta. A lista de compras soma a semana e converte o peso do prato pronto para o que se compra cru.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -318,20 +446,20 @@ export default function App() {
             <div role="tablist" aria-label="Dia da semana" className="grid grid-cols-7 gap-1.5">
               {DAYS.map((d, i) => {
                 const ch = changesInDay(plan[i]);
-                const active = i === day;
+                const activeDay = i === day;
                 return (
                   <button
                     key={d.short}
                     role="tab"
-                    aria-selected={active}
+                    aria-selected={activeDay}
                     onClick={() => setDay(i)}
                     className={cn(
                       "relative flex h-14 flex-col items-center justify-center rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      active ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"
+                      activeDay ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"
                     )}
                   >
                     {d.short}
-                    <span className={cn("mt-0.5 text-[10px] font-medium", active ? "text-primary-foreground/80" : "text-muted-foreground")}>
+                    <span className={cn("mt-0.5 text-[10px] font-medium", activeDay ? "text-primary-foreground/80" : "text-muted-foreground")}>
                       {ch === 0 ? "principal" : `${ch} troca${ch > 1 ? "s" : ""}`}
                     </span>
                   </button>
@@ -350,22 +478,37 @@ export default function App() {
                 </Button>
               </div>
             </div>
+            <p className="mt-1 text-xs text-muted-foreground">Toque no nome de quem vai comer fora pra tirar a refeição da lista.</p>
 
             <div className="mt-4 flex flex-col gap-4">
-              {MEALS.map((m) => {
+              {MEALS.map((m: Meal) => {
                 const mp = dayPlan[m.id];
+                const anyOn = PEOPLE.some((p) => mp.on[p.id]);
                 return (
-                  <Card key={m.id} className={cn(!mp.on && "border-dashed bg-transparent")}>
-                    <CardHeader>
-                      <CardTitle className={cn(!mp.on && "text-muted-foreground")}>{m.name}</CardTitle>
-                      <label htmlFor={`on-${m.id}`} className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground">
-                        {mp.on ? "Em casa" : "Fora / pular"}
-                        <Switch id={`on-${m.id}`} checked={mp.on} onCheckedChange={(v) => setOn(m.id, v)} />
-                      </label>
+                  <Card key={m.id} className={cn(!anyOn && "border-dashed bg-transparent")}>
+                    <CardHeader className="flex-wrap">
+                      <CardTitle className={cn(!anyOn && "text-muted-foreground")}>{m.name}</CardTitle>
+                      <div className="flex items-center gap-1.5" role="group" aria-label={`Quem come ${m.name.toLowerCase()} em casa`}>
+                        {PEOPLE.map(({ id: p, name }) => (
+                          <button
+                            key={p}
+                            aria-pressed={mp.on[p]}
+                            onClick={() => updateMeal(m.id, (x) => { x.on[p] = !x.on[p]; })}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                              mp.on[p] ? PERSON_STYLE[p].on : "text-muted-foreground hover:bg-muted"
+                            )}
+                          >
+                            <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", mp.on[p] ? PERSON_STYLE[p].dot : "bg-muted-foreground/40")} />
+                            {name}
+                            {!mp.on[p] && <span className="font-normal">· fora</span>}
+                          </button>
+                        ))}
+                      </div>
                     </CardHeader>
                     <CardContent>
-                      {!mp.on ? (
-                        <p className="text-sm text-muted-foreground">Não entra na lista de compras neste dia.</p>
+                      {!anyOn ? (
+                        <p className="text-sm text-muted-foreground">Os dois comem fora: não entra na lista de compras.</p>
                       ) : (
                         <div className="flex flex-col gap-4">
                           {m.freeText && (
@@ -374,53 +517,17 @@ export default function App() {
                               {m.freeText}
                             </div>
                           )}
-                          {m.slots.map((s) =>
-                            s.options.length === 1 ? (
-                              <div key={s.id}>
-                                <p className="mb-1.5 text-xs font-semibold text-muted-foreground">{s.label}</p>
-                                <div className="rounded-md bg-muted px-3 py-2">
-                                  <p className="text-sm font-semibold">{s.options[0].name}</p>
-                                  <p className="text-xs text-muted-foreground">{s.options[0].portion}</p>
-                                </div>
-                              </div>
-                            ) : (
-                              <div key={s.id} role="radiogroup" aria-label={`${m.name}: ${s.label}`}>
-                                <p className="mb-1.5 text-xs font-semibold text-muted-foreground">{s.label}</p>
-                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                                  {s.options.map((o, idx) => {
-                                    const sel = mp.pick[s.id] === idx;
-                                    return (
-                                      <button
-                                        key={o.id}
-                                        role="radio"
-                                        aria-checked={sel}
-                                        onClick={() => setPick(m.id, s.id, idx)}
-                                        className={cn(
-                                          "flex items-start gap-2.5 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                          sel ? "border-primary bg-primary-soft" : "bg-card hover:bg-muted"
-                                        )}
-                                      >
-                                        <span
-                                          aria-hidden
-                                          className={cn(
-                                            "mt-1 h-3.5 w-3.5 shrink-0 rounded-full border-2",
-                                            sel ? "border-primary bg-primary shadow-[inset_0_0_0_2px_hsl(var(--primary-soft))]" : "border-muted-foreground/50"
-                                          )}
-                                        />
-                                        <span className="min-w-0">
-                                          <span className="flex flex-wrap items-center gap-1.5 text-sm font-semibold">
-                                            {o.name}
-                                            {idx === 0 && <Badge className="bg-accent-soft text-accent-foreground dark:text-accent">principal</Badge>}
-                                          </span>
-                                          <span className="block text-xs text-muted-foreground">{o.portion}</span>
-                                        </span>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            )
-                          )}
+                          {m.slots.map((s) => (
+                            <SlotBlock
+                              key={s.id}
+                              slot={s}
+                              mp={mp}
+                              onPick={(id) => updateMeal(m.id, (x) => { x.pick[s.id] = id; })}
+                              onIrysPick={(id) => updateMeal(m.id, (x) => { x.irysPick[s.id] = id; })}
+                              onSplit={() => updateMeal(m.id, (x) => { x.irysPick[s.id] = chosen(s, "irys", x)!.id; })}
+                              onJoin={() => updateMeal(m.id, (x) => { delete x.irysPick[s.id]; })}
+                            />
+                          ))}
                         </div>
                       )}
                     </CardContent>
@@ -446,8 +553,9 @@ export default function App() {
                   <div>
                     <h2 className="font-display text-xl font-semibold">Lista de compras</h2>
                     <p className="text-sm text-muted-foreground tabular">
-                      {totals.mealsOn} de 28 refeições em casa · {doneCount}/{itemCount} no carrinho
+                      Refeições em casa: <PersonTag p="davi" /> {totals.mealsOn.davi}/{totals.mealsTotal.davi} · <PersonTag p="irys" /> {totals.mealsOn.irys}/{totals.mealsTotal.irys}
                     </p>
+                    <p className="text-sm text-muted-foreground tabular">{doneCount}/{itemCount} itens no carrinho</p>
                   </div>
                   <ShoppingBasket className="h-6 w-6 text-primary" />
                 </div>
@@ -461,9 +569,9 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="max-h-none divide-y lg:max-h-[calc(100vh-14rem)] lg:overflow-y-auto">
+              <div className="divide-y lg:max-h-[calc(100vh-15rem)] lg:overflow-y-auto">
                 {grouped.length === 0 && (
-                  <p className="px-4 py-6 text-sm text-muted-foreground">Nenhuma refeição marcada como “em casa” nesta semana.</p>
+                  <p className="px-4 py-6 text-sm text-muted-foreground">Nenhuma refeição em casa nesta semana.</p>
                 )}
                 {grouped.map((g) => (
                   <section key={g.sec} className="px-4 py-3">
@@ -482,9 +590,7 @@ export default function App() {
                                   <span className="shrink-0 text-sm font-bold tabular text-primary">{f.main}</span>
                                 </span>
                                 {f.detail && <span className="block text-xs text-muted-foreground">{f.detail}</span>}
-                                <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/80">
-                                  {[...it.by.entries()].map(([k, n]) => `${k} ×${n}`).join(" · ")}
-                                </span>
+                                <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/80">{byText(it.by)}</span>
                               </span>
                             </label>
                           </li>
@@ -494,10 +600,10 @@ export default function App() {
                   </section>
                 ))}
 
-                {totals.lunches > 0 && (
+                {totals.saladPlates > 0 && (
                   <section className="px-4 py-3">
                     <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Salada e legumes · à vontade</h3>
-                    <p className="mb-2 text-sm">Compre o bastante para <strong className="tabular">{totals.lunches} almoços</strong>, do que você gostar:</p>
+                    <p className="mb-2 text-sm">Compre o bastante para <strong className="tabular">{totals.saladPlates} pratos</strong> no almoço, do que vocês gostarem:</p>
                     <div className="flex flex-wrap gap-1.5">
                       {SALAD_SUGGESTIONS.map((s) => (
                         <span key={s} className="rounded-full border px-2.5 py-0.5 text-xs">{s}</span>
@@ -513,8 +619,10 @@ export default function App() {
 
                 <section className="px-4 py-3">
                   <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    Os pesos da dieta são do alimento pronto. Para comprar, a conversão usa fatores aproximados: frango e carne moída ×1,35, carne assada ×1,45,
-                    peixe ×1,25, inhame com casca ×1,15, cuscuz ≈ metade do peso em flocão, arroz cru ≈ 40% do cozido, 1 maracujá por copo de suco.
+                    Os pesos das dietas são do alimento pronto. Para comprar, a conversão usa fatores aproximados: frango e carne moída ×{FACTORS.frango.toLocaleString("pt-BR")},
+                    carne assada ×{FACTORS.carneAssada.toLocaleString("pt-BR")}, bisteca ×{FACTORS.bisteca.toLocaleString("pt-BR")}, peixe ×{FACTORS.peixe.toLocaleString("pt-BR")},
+                    inhame e macaxeira com casca ×{FACTORS.inhame.toLocaleString("pt-BR")}, batata doce ×{FACTORS.batataDoce.toLocaleString("pt-BR")},
+                    cuscuz ≈ metade do peso em flocão, arroz e feijão carioca crus ≈ 40% do cozido, 1 maracujá por copo de suco.
                     Tapioca de frango conta 60 g de goma + 40 g de frango; sanduíche, 2 fatias de pão de forma + 50 g de frango.
                   </p>
                 </section>
@@ -524,7 +632,6 @@ export default function App() {
         </div>
       </Tabs>
 
-      {/* lista: atalho flutuante no celular */}
       {view === "cardapio" && (
         <div className="fixed inset-x-0 bottom-0 z-20 border-t bg-card/95 px-4 py-3 backdrop-blur lg:hidden">
           <Button className="w-full" onClick={() => { setView("lista"); window.scrollTo({ top: 0 }); }}>
